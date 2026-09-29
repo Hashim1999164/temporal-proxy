@@ -16,13 +16,15 @@ type (
 	// caller's request into the upstream's request type, allocates the reply the
 	// upstream will fill, and folds that reply back into the message type the
 	// caller is waiting on. Build one with [Adapt] rather than by hand, so the
-	// conversions are written against concrete message types. A Translation holds
-	// no per-call state and is safe for concurrent use.
+	// conversions are written against concrete message types, or with [Answer]
+	// for a method the proxy replies to itself. A Translation holds no per-call
+	// state and is safe for concurrent use.
 	Translation struct {
 		from, to string
 		request  func(req proto.Message) (proto.Message, error)
 		response func(req, upstream, reply proto.Message) error
 		reply    func() proto.Message
+		answer   func(req, reply proto.Message) error
 		headers  map[string]string
 	}
 
@@ -81,6 +83,29 @@ func Adapt[Req, UpReq, UpResp, Resp proto.Message](
 	}
 }
 
+// Answer builds a [Translation] that replies to from without calling any
+// upstream: answer fills the caller's reply from its request alone. It is for a
+// method the upstream cannot serve and nothing else stands in for, where a reply
+// the proxy builds is closer to right than the upstream's refusal.
+func Answer[Req, Resp proto.Message](from string, answer func(Req, Resp) error) *Translation {
+	return &Translation{
+		from: from,
+		answer: func(m, out proto.Message) error {
+			req, ok := m.(Req)
+			if !ok {
+				return fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+			}
+
+			reply, ok := out.(Resp)
+			if !ok {
+				return fmt.Errorf("translation: %s wanted a %s reply, got %T", from, nameOf[Resp](), out)
+			}
+
+			return answer(req, reply)
+		},
+	}
+}
+
 // WithHeader stamps key: value on the substituted call and returns t, so a
 // mapping can declare the dialect the upstream method needs alongside the
 // conversions themselves. It replaces any value the caller sent rather than
@@ -104,7 +129,8 @@ func (t *Translation) WithHeader(key, value string) *Translation {
 // NewRegistry indexes ts by the method each translates from. It rejects a nil
 // entry, a method name that is not a gRPC full method, a translation onto
 // itself, and two translations of the same inbound method, so a mapping mistake
-// surfaces at construction rather than on the first request that hits it.
+// surfaces at construction rather than on the first request that hits it. An
+// [Answer] has no upstream method, so only its inbound one is checked.
 func NewRegistry(ts ...*Translation) (*Registry, error) {
 	byMethod := make(map[string]*Translation, len(ts))
 	for i, t := range ts {
@@ -117,20 +143,24 @@ func NewRegistry(ts ...*Translation) (*Registry, error) {
 			return nil, err
 		}
 
-		to, err := canonical(t.to)
-		if err != nil {
-			return nil, err
-		}
+		if t.answer == nil {
+			to, err := canonical(t.to)
+			if err != nil {
+				return nil, err
+			}
 
-		if from == to {
-			return nil, fmt.Errorf("translation: %s translates onto itself", from)
+			if from == to {
+				return nil, fmt.Errorf("translation: %s translates onto itself", from)
+			}
+
+			t.to = to
 		}
 
 		if _, dup := byMethod[from]; dup {
 			return nil, fmt.Errorf("translation: %s is translated twice", from)
 		}
 
-		t.from, t.to = from, to
+		t.from = from
 		byMethod[from] = t
 	}
 
@@ -182,7 +212,8 @@ func (t *Translation) stamp(ctx context.Context) context.Context {
 // From is the inbound method this translation replaces.
 func (t *Translation) From() string { return t.from }
 
-// To is the upstream method that stands in for it.
+// To is the upstream method that stands in for it, or empty for an [Answer],
+// which calls none.
 func (t *Translation) To() string { return t.to }
 
 // canonical returns fullMethod in the leading-slash "/pkg.Service/Method" form

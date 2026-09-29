@@ -50,8 +50,8 @@ func DialOptions(r *Registry, opts ...Option) []grpc.DialOption {
 // request is converted, invoked under the upstream method, and the upstream's
 // reply is folded into the reply the caller allocated. A method r does not
 // translate is invoked unchanged, as is a call whose request or reply is not a
-// proto message. Any headers the translation declares are stamped on the
-// substituted call only.
+// proto message. An [Answer] fills the reply itself and invokes nothing. Any
+// headers the translation declares are stamped on the substituted call only.
 //
 // An upstream error is returned as it arrived, so the caller sees the upstream's
 // status rather than a translated one. A conversion that fails becomes Internal
@@ -83,6 +83,14 @@ func unaryClientInterceptor(r *Registry, opts ...Option) grpc.UnaryClientInterce
 			// proto registry, so this only happens on a hand-rolled call; forwarding
 			// it unchanged is closer to right than failing it.
 			return invoker(ctx, method, req, reply, cc, callOpts...)
+		}
+
+		if t.answer != nil {
+			if err := t.answer(in, out); err != nil {
+				return rpc.StatusError("translation: answering the request failed", err)
+			}
+
+			return nil
 		}
 
 		upReq, err := t.request(in)
