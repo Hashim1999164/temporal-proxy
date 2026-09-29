@@ -21,10 +21,7 @@ type (
 	// state and is safe for concurrent use.
 	Translation struct {
 		from, to string
-		request  func(req proto.Message) (proto.Message, error)
-		response func(req, upstream, reply proto.Message) error
-		reply    func() proto.Message
-		answer   func(req, reply proto.Message) error
+		call     func(ctx context.Context, req, reply proto.Message, send sendFunc) error
 		headers  map[string]string
 	}
 
@@ -35,6 +32,10 @@ type (
 	Registry struct {
 		byMethod map[string]*Translation
 	}
+
+	// sendFunc invokes the upstream method a [Translation] stands in for, filling
+	// reply from req.
+	sendFunc func(ctx context.Context, req, reply proto.Message) error
 )
 
 // Adapt builds a [Translation] from from onto to out of two typed conversions.
@@ -51,34 +52,34 @@ func Adapt[Req, UpReq, UpResp, Resp proto.Message](
 	return &Translation{
 		from: from,
 		to:   to,
-		reply: func() proto.Message {
-			return newMessage[UpResp]()
-		},
-		request: func(m proto.Message) (proto.Message, error) {
+		call: func(ctx context.Context, m, out proto.Message, send sendFunc) error {
 			req, ok := m.(Req)
 			if !ok {
-				return nil, fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+				err := fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+				return rpc.StatusError("translation: adapting the request failed", err)
 			}
 
-			return request(req)
-		},
-		response: func(m, up, out proto.Message) error {
-			req, ok := m.(Req)
-			if !ok {
-				return fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+			upReq, err := request(req)
+			if err != nil {
+				return rpc.StatusError("translation: adapting the request failed", err)
 			}
 
-			upstream, ok := up.(UpResp)
-			if !ok {
-				return fmt.Errorf("translation: %s wanted a %s reply, got %T", to, nameOf[UpResp](), up)
+			upstream := newMessage[UpResp]()
+			if err := send(ctx, upReq, upstream); err != nil {
+				return err
 			}
 
 			reply, ok := out.(Resp)
 			if !ok {
-				return fmt.Errorf("translation: %s wanted a %s reply, got %T", from, nameOf[Resp](), out)
+				err := fmt.Errorf("translation: %s wanted a %s reply, got %T", from, nameOf[Resp](), out)
+				return rpc.StatusError("translation: adapting the reply failed", err)
 			}
 
-			return response(req, upstream, reply)
+			if err := response(req, upstream, reply); err != nil {
+				return rpc.StatusError("translation: adapting the reply failed", err)
+			}
+
+			return nil
 		},
 	}
 }
@@ -90,18 +91,24 @@ func Adapt[Req, UpReq, UpResp, Resp proto.Message](
 func Answer[Req, Resp proto.Message](from string, answer func(Req, Resp) error) *Translation {
 	return &Translation{
 		from: from,
-		answer: func(m, out proto.Message) error {
+		call: func(_ context.Context, m, out proto.Message, _ sendFunc) error {
 			req, ok := m.(Req)
 			if !ok {
-				return fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+				err := fmt.Errorf("translation: %s wanted a %s request, got %T", from, nameOf[Req](), m)
+				return rpc.StatusError("translation: answering the request failed", err)
 			}
 
 			reply, ok := out.(Resp)
 			if !ok {
-				return fmt.Errorf("translation: %s wanted a %s reply, got %T", from, nameOf[Resp](), out)
+				err := fmt.Errorf("translation: %s wanted a %s reply, got %T", from, nameOf[Resp](), out)
+				return rpc.StatusError("translation: answering the request failed", err)
 			}
 
-			return answer(req, reply)
+			if err := answer(req, reply); err != nil {
+				return rpc.StatusError("translation: answering the request failed", err)
+			}
+
+			return nil
 		},
 	}
 }
@@ -143,7 +150,7 @@ func NewRegistry(ts ...*Translation) (*Registry, error) {
 			return nil, err
 		}
 
-		if t.answer == nil {
+		if t.to != "" {
 			to, err := canonical(t.to)
 			if err != nil {
 				return nil, err
@@ -231,9 +238,9 @@ func canonical(fullMethod string) (string, error) {
 // newMessage allocates an empty T. The zero value of a generated message type is
 // a nil pointer, which still carries its descriptor, so this works without the
 // type registry the forwarder uses.
-func newMessage[T proto.Message]() proto.Message {
+func newMessage[T proto.Message]() T {
 	var zero T
-	return zero.ProtoReflect().New().Interface()
+	return zero.ProtoReflect().New().Interface().(T)
 }
 
 // nameOf returns the proto full name of T, so a type mismatch names the message

@@ -5,8 +5,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
-
-	"github.com/temporalio/temporal-proxy/internal/rpc"
 )
 
 // Option configures the interceptor [DialOptions] installs.
@@ -85,29 +83,9 @@ func unaryClientInterceptor(r *Registry, opts ...Option) grpc.UnaryClientInterce
 			return invoker(ctx, method, req, reply, cc, callOpts...)
 		}
 
-		if t.answer != nil {
-			if err := t.answer(in, out); err != nil {
-				return rpc.StatusError("translation: answering the request failed", err)
-			}
-
-			return nil
-		}
-
-		upReq, err := t.request(in)
-		if err != nil {
-			return rpc.StatusError("translation: adapting the request failed", err)
-		}
-
-		upReply := t.reply()
-		if err := o.invoke(t.stamp(ctx), t, upReq, upReply, cc, invoker, callOpts...); err != nil {
-			return err
-		}
-
-		if err := t.response(in, upReply, out); err != nil {
-			return rpc.StatusError("translation: adapting the reply failed", err)
-		}
-
-		return nil
+		return t.call(ctx, in, out, func(ctx context.Context, req, reply proto.Message) error {
+			return o.invoke(t.stamp(ctx), t, req, reply, cc, invoker, callOpts...)
+		})
 	}
 }
 

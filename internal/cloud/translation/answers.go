@@ -1,8 +1,7 @@
 package translation
 
 import (
-	operatorservice "go.temporal.io/api/operatorservice/v1"
-	workflowservice "go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/temporalio/temporal-proxy/internal/services"
 )
@@ -19,35 +18,28 @@ const (
 	listSearchAttributesMethod = "/" + services.OperatorService + "/ListSearchAttributes"
 )
 
+type resetable interface {
+	proto.Message
+	Reset()
+}
+
 // getClusterInfo answers WorkflowService.GetClusterInfo with an empty reply. An
 // empty reply is what the Temporal UI itself uses when it knows it is talking to
 // Cloud, so a client that tolerates absent fields keeps working, where Cloud's
 // refusal fails it outright. Nothing is filled in, since Cloud reports no
 // version, cluster id, or visibility store to fill it with.
 func getClusterInfo() *Translation {
-	return Answer(getClusterInfoMethod, clusterInfoReply)
+	return Answer(getClusterInfoMethod, resetReply)
 }
 
 // listSearchAttributes answers OperatorService.ListSearchAttributes with an empty
 // reply rather than Cloud's PermissionDenied, which the Temporal UI treats as an
 // expired login on every namespace page.
 func listSearchAttributes() *Translation {
-	return Answer(listSearchAttributesMethod, searchAttributesReply)
+	return Answer(listSearchAttributesMethod, resetReply)
 }
 
-// clusterInfoReply clears the caller's reply, so a reused message cannot carry a
-// value this answer never stated.
-func clusterInfoReply(_ *workflowservice.GetClusterInfoRequest, reply *workflowservice.GetClusterInfoResponse) error {
-	reply.Reset()
-	return nil
-}
-
-// searchAttributesReply clears the caller's reply, for the same reason as
-// clusterInfoReply.
-func searchAttributesReply(
-	_ *operatorservice.ListSearchAttributesRequest,
-	reply *operatorservice.ListSearchAttributesResponse,
-) error {
+func resetReply(_ proto.Message, reply resetable) error {
 	reply.Reset()
 	return nil
 }
