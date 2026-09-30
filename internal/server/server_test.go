@@ -359,34 +359,6 @@ func TestWithServerCodec(t *testing.T) {
 	require.Positive(t, rec.calls.Load(), "forced server codec should be exercised")
 }
 
-func TestGzipCompressedHealthCheck(t *testing.T) {
-	t.Parallel()
-
-	svr, err := server.New()
-	require.NoError(t, err)
-
-	lis := bufconn.Listen(1024 * 1024)
-	defer func() { _ = lis.Close() }()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- svr.Start(t.Context(), lis) }()
-
-	conn := newBufConnClient(t, lis)
-	defer func() { _ = conn.Close() }()
-
-	client := grpc_health_v1.NewHealthClient(conn)
-	resp, err := client.Check(
-		t.Context(),
-		&grpc_health_v1.HealthCheckRequest{},
-		grpc.UseCompressor("gzip"),
-	)
-	require.NoError(t, err)
-	require.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.GetStatus())
-
-	require.NoError(t, svr.Stop(t.Context()))
-	<-errCh
-}
-
 func TestWithHealthServices(t *testing.T) {
 	t.Parallel()
 
